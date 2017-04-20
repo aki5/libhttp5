@@ -1,69 +1,6 @@
 
-#include <stdio.h>
-#include <winsock2.h>
-
-#define nelem(x) (sizeof(x)/sizeof(x[0]))
-
-typedef struct Http5 Http5;
-typedef struct Http5ref Http5ref;
-typedef struct Http5buf Http5buf;
-typedef struct Http5header Http5header;
-typedef struct Http5request Http5request;
-typedef struct Http5response Http5response;
-
-enum {
-	HTTP5_READ_READY = 1<<0,
-	HTTP5_WRITE_READY = 1<<1,
-
-	HTTP5_READ_ERROR = 1<<2,
-	HTTP5_READ_EOF = 1<<3,
-	HTTP5_WRITE_ERROR = 1<<4,
-	HTTP5_PROTOCOL_ERROR = 1<<5,
-	HTTP5_ERROR_MASK = HTTP5_READ_ERROR | HTTP5_READ_EOF | HTTP5_WRITE_ERROR | HTTP5_PROTOCOL_ERROR,
-
-	HTTP5_PARSE_REQUEST = 0,
-	HTTP5_PARSE_HEADER = 1,
-	HTTP5_PARSE_BODY = 2,
-};
-
-struct Http5ref {
-	size_t off;
-	size_t len;
-};
-
-struct Http5header {
-	Http5ref key;
-	Http5ref val;
-};
-
-struct Http5request {
-	Http5ref method, resource, version;
-	Http5ref body;
-	Http5header headers[32];
-	size_t nheaders;
-	int state;
-};
-
-struct Http5response {
-	Http5ref version, code, reason;
-	Http5ref body;
-	Http5header headers[32];
-	size_t nheaders;
-};
-
-struct Http5buf {
-	char *buf;
-	size_t off;
-	size_t len;
-	size_t cap;
-};
-
-struct Http5 {
-	Http5request req;
-	Http5response resp;
-	Http5buf input;
-	Http5buf output;
-};
+#include "os.h"
+#include "http5.h"
 
 static int
 iswhite(int c)
@@ -108,7 +45,7 @@ isvaluechar(int c)
 static int
 skipspace(char *buf, size_t *offp, size_t len)
 {
-	int off = *offp;
+	size_t off = *offp;
 	while(off < len && iswhite(buf[off]))
 		off++;
 	if(off == len)
@@ -122,7 +59,7 @@ skipspace(char *buf, size_t *offp, size_t len)
 static int
 skipnonspace(char *buf, size_t *offp, size_t len)
 {
-	int off = *offp;
+	size_t off = *offp;
 	while(off < len && isnonspace(buf[off]))
 		off++;
 	if(off == len)
@@ -134,7 +71,7 @@ skipnonspace(char *buf, size_t *offp, size_t len)
 static int
 skipkey(char *buf, size_t *offp, size_t len)
 {
-	int off = *offp;
+	size_t off = *offp;
 	while(off < len && iskeychar(buf[off]))
 		off++;
 	if(off == len)
@@ -146,7 +83,7 @@ skipkey(char *buf, size_t *offp, size_t len)
 static int
 skipvalue(char *buf, size_t *offp, size_t len)
 {
-	int off = *offp;
+	size_t off = *offp;
 	while(off < len && isvaluechar(buf[off]))
 		off++;
 	if(off == len)
@@ -158,7 +95,7 @@ skipvalue(char *buf, size_t *offp, size_t len)
 static int
 skipendline(char *buf, size_t *offp, size_t len)
 {
-	int off = *offp;
+	size_t off = *offp;
 	if(off == len)
 		return -1;
 	if(buf[off++] != '\r')
@@ -179,14 +116,44 @@ http5tolower(Http5buf *htbuf, Http5ref *ref)
 	buf = htbuf->buf;
 	i = ref->off;
 	end = i + ref->len;
-	for(; i < end; i++)
-		buf[i] = tolower(buf[i]);
+	for(; i < end; i++){
+		int ch = buf[i];
+		// this is ascii-specific, which is
+		// approppriate since http is ascii.
+		if(ch >= 0x41 && ch <= 0x5a)
+			ch += 32;
+		buf[i] = ch;
+	}
+}
+
+static int
+http5cmplow(Http5ref *ref, Http5buf *htbuf, char *key)
+{
+	char *p;
+	size_t i, keylen;
+	if(ref == NULL)
+		return -1;
+	keylen = strlen(key);
+	keylen = keylen < ref->len ? keylen : ref->len;
+	p = htbuf->buf + ref->off;
+	for(i = 0; i < keylen; i++){
+		int ch = p[i];
+		if(ch >= 0x41 && ch <= 0x5a)
+			ch += 32;
+		if(ch < key[i])
+			return -1;
+		else if(ch > key[i])
+			return 1;
+	}
+	return 0;
 }
 
 static int
 http5cmp(Http5ref *ref, Http5buf *htbuf, char *key)
 {
 	size_t keylen;
+	if(ref == NULL)
+		return -1;
 	keylen = strlen(key);
 	keylen = keylen < ref->len ? keylen : ref->len;
 	return memcmp(htbuf->buf + ref->off, key, keylen);
@@ -229,7 +196,8 @@ http5number(Http5buf *htbuf, Http5ref *ref, size_t *valp)
 			return -1;
 		val = tval;
 	}
-	return val;
+	*valp = val;
+	return 0;
 }
 
 static int
@@ -242,12 +210,14 @@ http5parse(Http5request *req, Http5buf *htbuf)
 	size_t methodoff, methodlen;
 	size_t resourceoff, resourcelen;
 	size_t versionoff, versionlen;
-	int code, ch;
+	int code;
 
 
 	buf = htbuf->buf;
 	off = htbuf->off;
 	len = htbuf->len;
+
+//fprintf(stderr, "http5parse:\n%.*s\n--\n", htbuf->len, htbuf->buf);
 
 	switch(req->state){
 	case HTTP5_PARSE_REQUEST:
@@ -342,6 +312,7 @@ http5parse(Http5request *req, Http5buf *htbuf)
 		if(clref == NULL){
 			if(http5header(req, htbuf, "transfer-encoding") != NULL)
 				return -2;
+			htbuf->off = off;
 			return 0;
 		}
 		req->body.off = off;
@@ -355,8 +326,29 @@ http5parse(Http5request *req, Http5buf *htbuf)
 		if(htbuf->len >= htbuf->off)
 			return 0;
 		return -1;
+	case HTTP5_FLUSH_OUTPUT:
+		return 0;
 	}
 	return -2;
+}
+
+static int
+http5requestdone(Http5request *req, Http5buf *htbuf)
+{
+	req->nheaders = 0;
+	memmove(htbuf->buf, htbuf->buf+htbuf->off, htbuf->len - htbuf->off);
+	htbuf->len -= htbuf->off;
+	htbuf->off = 0;
+	return 0;
+}
+
+static int
+http5responsedone(Http5response *resp, Http5buf *htbuf)
+{
+	resp->nheaders = 0;
+	htbuf->len -= htbuf->off;
+	htbuf->off = 0;
+	return 0;
 }
 
 static int
@@ -457,19 +449,7 @@ http5respond(Http5response *resp, Http5buf *htbuf)
 static int
 http5process(Http5response *resp, Http5buf *outbuf, Http5request *req, Http5buf *inbuf)
 {
-	size_t i;
-	fprintf(stderr, "http5 process\n");
-	fprintf(stderr, "method: %.*s\n", (int)req->method.len, inbuf->buf + req->method.off);
-	fprintf(stderr, "resource: %.*s\n", (int)req->resource.len, inbuf->buf + req->resource.off);
-	fprintf(stderr, "version: %.*s\n", (int)req->version.len, inbuf->buf + req->version.off);
-
-	for(i = 0; i < req->nheaders; i++){
-		fprintf(stderr, "%.*s: %.*s\n",
-			(int)req->headers[i].key.len, inbuf->buf + req->headers[i].key.off,
-			(int)req->headers[i].val.len, inbuf->buf + req->headers[i].val.off
-		);
-	}
-
+//fprintf(stderr, "process:%.*s--\n", (int)inbuf->len, inbuf->buf);
 	if(http5respond(resp, outbuf) == -1)
 		return -1;
 	if(http5putheader(resp, outbuf, "content-type", "text/plain") == -1)
@@ -477,6 +457,7 @@ http5process(Http5response *resp, Http5buf *outbuf, Http5request *req, Http5buf 
 	char *body = "hello world\n";
 	if(http5putbody(resp, outbuf, body, strlen(body)) == -1)
 		return -1;
+	req->state = HTTP5_FLUSH_OUTPUT;
 	return 0;
 }
 
@@ -504,42 +485,57 @@ http5init(Http5 *ht5, int incap, int outcap)
 static int
 http5io(Http5 *ht5, int fd, int flags)
 {
-	size_t nwr, nrd;
+	ssize_t nwr, nrd;
 	int code;
 	int rflags = 0;
 
 	if((flags & HTTP5_READ_READY) != 0){
 		nrd = recv(fd, ht5->input.buf + ht5->input.len, ht5->input.cap - ht5->input.len, 0);
-		if(nrd == -1)
-			rflags |= HTTP5_READ_ERROR;
-		else if(nrd == 0)
+		if(nrd == -1){
+			if(errno != EAGAIN)
+				rflags |= HTTP5_READ_ERROR;
+		} else if(nrd == 0){
 			rflags |= HTTP5_READ_EOF;
-		else
+		} else {
 			ht5->input.len += nrd;
+		}
 	}
 
-	code = http5parse(&ht5->req, &ht5->input);
-	if(code == -2)
-		rflags |= HTTP5_PROTOCOL_ERROR;
-	if(code == 0){
-		if(http5process(&ht5->resp, &ht5->output, &ht5->req, &ht5->input) == -1)
+	if(ht5->req.state != HTTP5_FLUSH_OUTPUT && ht5->input.off < ht5->input.len){
+		code = http5parse(&ht5->req, &ht5->input);
+		if(code == -2)
 			rflags |= HTTP5_PROTOCOL_ERROR;
+		if(code == 0){
+			if(http5process(&ht5->resp, &ht5->output, &ht5->req, &ht5->input) == -1)
+				rflags |= HTTP5_PROCESS_ERROR;
+		}
 	}
 
 	if(ht5->output.off < ht5->output.len && (flags & HTTP5_WRITE_READY) != 0){
 		nwr = send(fd, ht5->output.buf + ht5->output.off, ht5->output.len - ht5->output.off, 0);
-		fprintf(stderr, "http5io: wrote %zd:\n", nwr);
-		fprintf(stderr, "%.*s\n", ht5->output.len - ht5->output.off, ht5->output.buf + ht5->output.off);
-		if(nwr == -1)
-			rflags |= HTTP5_WRITE_ERROR;
-		else
+		if(nwr == -1){
+			if(errno != EAGAIN)
+				rflags |= HTTP5_WRITE_ERROR;
+		} else {
 			ht5->output.off += nwr;
+		}
 	}
 
 	if(ht5->output.len < ht5->output.cap && ht5->input.len < ht5->input.cap)
 		rflags |= HTTP5_READ_READY;
 	if(ht5->output.off < ht5->output.len)
 		rflags |= HTTP5_WRITE_READY;
+	if(ht5->req.state == HTTP5_FLUSH_OUTPUT && ht5->output.off == ht5->output.len){
+		ht5->req.state = 0;
+		if(http5cmp(&ht5->req.version, &ht5->input, "http/1.0") == 0)
+			if(http5cmp(http5header(&ht5->req, &ht5->input, "connection"), &ht5->input, "keep-alive") != 0)
+				rflags |= HTTP5_READ_EOF;
+		if(http5cmp(&ht5->req.version, &ht5->input, "http/1.1") == 0)
+			if(http5cmp(http5header(&ht5->req, &ht5->input, "connection"), &ht5->input, "close") == 0)
+				rflags |= HTTP5_READ_EOF;
+		http5requestdone(&ht5->req, &ht5->input);
+		http5responsedone(&ht5->resp, &ht5->output);
+	}
 	return rflags;
 }
 
@@ -553,7 +549,7 @@ http5server(int port, int incap, int outcap)
 	struct {
 		char name[64];
 		struct sockaddr sa;
-		int salen;
+		socklen_t salen;
 		int wready;
 		int fd;
 		Http5 ht5;
@@ -572,6 +568,12 @@ http5server(int port, int incap, int outcap)
 		goto error;
 	}
 
+	int flag = 1;
+	if(setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof flag) == -1){
+		fprintf(stderr, "http5server: setsockopt: %s\n", strerror(errno));
+		goto error;
+	}
+
 	sa.sin_family = AF_INET;
 	sa.sin_port = htons(port);
 	sa.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -580,7 +582,7 @@ http5server(int port, int incap, int outcap)
 		goto error;
 	}
 
-	if(listen(lfd, 100) == -1){
+	if(listen(lfd, 1000) == -1){
 		fprintf(stderr, "http5server: listen: %s\n", strerror(errno));
 		goto error;
 	}
@@ -617,7 +619,6 @@ http5server(int port, int incap, int outcap)
 				fprintf(stderr, "unsupported address family\n");
 				goto next;
 			}
-			fprintf(stderr, "accepted from: %s\n", conn->name);
 			if(conn->fd != -1){
 				int nonblock = 1;
 				if(ioctlsocket(conn->fd, FIONBIO, &nonblock) == -1){
@@ -632,6 +633,9 @@ http5server(int port, int incap, int outcap)
 					goto next;
 				}
 				nconns++;
+				// this is cheating a little, but can save a select round if we are lucky.
+				//FD_SET(conn->fd, rset);
+				//FD_SET(conn->fd, wset);
 			}
 		}
 next:
@@ -656,7 +660,8 @@ next:
 					FD_CLR(conns[i].fd, wset);
 					FD_CLR(conns[i].fd, nextrset);
 					FD_CLR(conns[i].fd, nextwset);
-					fprintf(stderr, "http5server: error from http5io: closing\n");
+					if((flags & HTTP5_ERROR_MASK) != HTTP5_READ_EOF)
+						fprintf(stderr, "http5server: error from http5io: flags 0x%x, closing.\n", flags & HTTP5_ERROR_MASK);
 					closesocket(conns[i].fd);
 					conns[i].fd = -1;
 				} else {
@@ -702,18 +707,4 @@ error:
 	if(nfd != -1)
 		closesocket(nfd);
 	return -1;
-}
-
-int
-main(int argc, char *argv[])
-{
-	WSADATA wsadata;
-	int port = 5555;
-	if(WSAStartup(MAKEWORD(2,2), &wsadata) != 0){
-		fprintf(stderr, "winsock initialization failed\n");
-		exit(1);
-	}
-	if(argc > 1)
-		port = strtol(argv[1], NULL, 10);
-	return http5server(port, 8192, 8192);
 }
