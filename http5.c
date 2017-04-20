@@ -482,6 +482,15 @@ http5init(Http5 *ht5, int incap, int outcap)
 	return 0;
 }
 
+static void
+http5destroy(Http5 *ht5)
+{
+	if(ht5->input.buf)
+		free(ht5->input.buf);
+	if(ht5->output.buf)
+		free(ht5->output.buf);
+}
+
 static int
 http5io(Http5 *ht5, int fd, int flags)
 {
@@ -639,8 +648,8 @@ http5server(int port, int incap, int outcap)
 			}
 		}
 next:
-		FD_ZERO(nextrset);
-		FD_ZERO(nextwset);
+		//FD_ZERO(nextrset);
+		//FD_ZERO(nextwset);
 		FD_SET(lfd, nextrset);
 		maxfd = lfd;
 		nactive = 0;
@@ -663,6 +672,7 @@ next:
 					if((flags & HTTP5_ERROR_MASK) != HTTP5_READ_EOF)
 						fprintf(stderr, "http5server: error from http5io: flags 0x%x, closing.\n", flags & HTTP5_ERROR_MASK);
 					closesocket(conns[i].fd);
+					http5destroy(&conns[i].ht5);
 					conns[i].fd = -1;
 				} else {
 					if((flags & HTTP5_READ_READY) != 0){
