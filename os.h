@@ -1,7 +1,9 @@
 
-#ifdef WIN32
+#if defined(_WIN32)
 #include <stdio.h>
 #include <winsock2.h>
+typedef int ssize_t;
+typedef int socklen_t;
 #else
 #include <stdio.h>
 #include <stdlib.h>

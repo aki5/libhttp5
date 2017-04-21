@@ -578,7 +578,7 @@ http5server(int port, int incap, int outcap)
 	}
 
 	int flag = 1;
-	if(setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof flag) == -1){
+	if(setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, (void *)&flag, sizeof flag) == -1){
 		fprintf(stderr, "http5server: setsockopt: %s\n", strerror(errno));
 		goto error;
 	}
