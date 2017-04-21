@@ -12,7 +12,7 @@ LIBS=ws2_32.lib # \
 all: main.exe #\
 !else
 
-all: http5.exe
+all: http5
 RM=rm -f
 O=o
 LIBS=-lm
