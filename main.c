@@ -3,19 +3,51 @@
 #include "http5.h"
 
 static int
-handleall(Http5message *resp, Http5message *req)
+handleall(Http5message *output, Http5message *input)
 {
 	Http5buf *outbuf;
-	outbuf = &resp->buf;
-//fprintf(stderr, "process:%.*s--\n", (int)inbuf->len, inbuf->buf);
-	if(http5ok(resp) == -1)
-		return -1;
-	if(http5putheader(resp, "content-type", "text/plain") == -1)
-		return -1;
-	char *body = "hello world\n";
-	if(http5putbody(resp, body, strlen(body)) == -1)
-		return -1;
-	req->state = HTTP5_FLUSH_OUTPUT;
+	outbuf = &output->buf;
+	if(input->state == HTTP5_DONE && output->state == HTTP5_READY){
+	//fprintf(stderr, "process:%.*s--\n", (int)inbuf->len, inbuf->buf);
+		if(http5ok(output) == -1)
+			return -1;
+		if(http5putheader(output, "content-type", "text/plain") == -1)
+			return -1;
+		char *body = "hello world\n";
+		if(http5putbody(output, body, strlen(body)) == -1)
+			return -1;
+		output->state = HTTP5_WRITE;
+	}
+	if(input->state == HTTP5_DONE && output->state == HTTP5_DONE){
+		http5clear(input);
+		http5clear(output);
+	}
+	return 0;
+}
+
+static int
+handleget(Http5message *output, Http5message *input)
+{
+	fprintf(stderr, "handleget: instate: %d outstate: %d\n", input->state, output->state);
+	if(output->state == HTTP5_READY){
+		Http5buf *outbuf = &output->buf;
+		http5request(output, "GET", "/", "HTTP/1.1");
+		if(http5putheader(output, "Host", "www.google.com") == -1)
+			return -1;
+		if(http5putbody(output, "", 0) == -1)
+			return -1;
+
+		fprintf(stderr, "request:%.*s--\n", (int)outbuf->len, outbuf->buf);
+		output->state = HTTP5_WRITE;
+		input->state = HTTP5_READY;
+	}
+	if(output->state == HTTP5_DONE && input->state == HTTP5_DONE){
+		Http5buf *inbuf = &input->buf;
+		fprintf(stderr, "handleget: chunk size %zd\n", input->body.len);
+		input->state = HTTP5_PARSE_CHUNK;
+		if(input->body.len == 0)
+			input->state = HTTP5_CLOSE;
+	}
 	return 0;
 }
 
@@ -32,5 +64,6 @@ main(int argc, char *argv[])
 #endif
 	if(argc > 1)
 		port = strtol(argv[1], NULL, 10);
+	http5connect("2607:f8b0:4005:806::200e", 80, 1<<20, 1<<20, handleget);
 	return http5server(port, 8192, 8192, handleall);
 }

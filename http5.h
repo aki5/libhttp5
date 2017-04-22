@@ -9,20 +9,25 @@ enum {
 	HTTP5_TYPE_REQUEST = 1,
 	HTTP5_TYPE_RESPONSE = 2,
 
+	HTTP5_READY = 0,
 	HTTP5_PARSE_LINE = 0,
-	HTTP5_PARSE_HEADER = 1,
-	HTTP5_PARSE_BODY = 2,
-	HTTP5_FLUSH_OUTPUT = 3,
+	HTTP5_PARSE_HEADER,
+	HTTP5_PARSE_BODY,
+	HTTP5_PARSE_CHUNK,
+	HTTP5_PARSE_CHUNK_BODY,
+	HTTP5_WRITE,
+	HTTP5_DONE,
+	HTTP5_CLOSE,
 
 	HTTP5_READ_READY = 1<<0,
 	HTTP5_WRITE_READY = 1<<1,
 
-	HTTP5_READ_ERROR = 1<<2,
-	HTTP5_READ_EOF = 1<<3,
+	HTTP5_NORMAL_CLOSE = 1<<2,
+	HTTP5_READ_ERROR = 1<<3,
 	HTTP5_WRITE_ERROR = 1<<4,
 	HTTP5_PROTOCOL_ERROR = 1<<5,
 	HTTP5_PROCESS_ERROR = 1<<6,
-	HTTP5_ERROR_MASK = HTTP5_READ_ERROR | HTTP5_READ_EOF | HTTP5_WRITE_ERROR | HTTP5_PROTOCOL_ERROR | HTTP5_PROCESS_ERROR,
+	HTTP5_ERROR_MASK = HTTP5_READ_ERROR | HTTP5_NORMAL_CLOSE | HTTP5_WRITE_ERROR | HTTP5_PROTOCOL_ERROR | HTTP5_PROCESS_ERROR,
 };
 
 struct Http5ref {
@@ -45,15 +50,7 @@ struct Http5buf {
 struct Http5message {
 	int type;
 	int state;
-	union {
-		Http5ref method;
-		Http5ref reason;
-	};
-	union {
-		Http5ref resource;
-		Http5ref code;
-	};
-	Http5ref version;
+	Http5ref line[3];
 	Http5ref body;
 	Http5header headers[32];
 	size_t nheaders;
@@ -69,5 +66,6 @@ int http5ok(Http5message *resp);
 int http5code(Http5message *resp, int code);
 int http5respond(Http5message *resp, char *version, char *code, char *reason);
 
+void http5clear(Http5message *msg);
 int http5putheader(Http5message *msg, char *key, char *value);
 int http5putbody(Http5message *msg, char *body, size_t len);
