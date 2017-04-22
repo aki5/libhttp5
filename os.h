@@ -6,6 +6,7 @@
 typedef int ssize_t;
 typedef int socklen_t;
 #define sockerrno WSAGetLastError()
+#define wouldblock(err) ((err) == WSAEINPROGRESS || (err) == WSAEWOULDBLOCK)
 #else
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,7 @@ typedef int socklen_t;
 #define closesocket close
 #define ioctlsocket ioctl
 #define sockerrno errno
+#define wouldblock(err) ((err) == EINPROGRESS || (err) == EWOULDBLOCK || (err) == EAGAIN)
 #endif
 
 #define nelem(x) (sizeof(x)/sizeof(x[0]))

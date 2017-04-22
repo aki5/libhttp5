@@ -685,7 +685,7 @@ http5io(Http5chan *ht5, int fd, int flags)
 	if(ht5->input.state != HTTP5_DONE && (flags & HTTP5_READ_READY) != 0){
 		nrd = recv(fd, ht5->input.buf.buf + ht5->input.buf.len, ht5->input.buf.cap - ht5->input.buf.len, 0);
 		if(nrd == -1){
-			if(sockerrno != EAGAIN)
+			if(!wouldblock(sockerrno))
 				rflags |= HTTP5_READ_ERROR;
 		} else if(nrd == 0){
 			rflags |= HTTP5_NORMAL_CLOSE;
@@ -714,7 +714,7 @@ parsemore:
 		if(ht5->output.buf.len != ht5->output.buf.off){
 			nwr = send(fd, ht5->output.buf.buf + ht5->output.buf.off, ht5->output.buf.len - ht5->output.buf.off, 0);
 			if(nwr == -1){
-				if(sockerrno != EAGAIN)
+				if(!wouldblock(sockerrno))
 					rflags |= HTTP5_WRITE_ERROR;
 			} else {
 				ht5->output.buf.off += nwr;
@@ -773,15 +773,22 @@ http5connect(char *addr, int port, int incap, int outcap, int (*handler)(Http5me
 		goto error;
 	}
 
-	int flag = 1;
+	int flag = 0;
+	if(setsockopt(conn->fd, IPPROTO_IPV6, IPV6_V6ONLY, (void *)&flag, sizeof flag) == -1){
+		fprintf(stderr, "http5server: setsockopt ipv6only=%d: %s\n", flag, strerror(sockerrno));
+		goto error;
+	}
+
+	flag = 1;
 	if(ioctlsocket(conn->fd, FIONBIO, &flag) == -1){
 		fprintf(stderr, "http5connect: failed to set non-blocking io: %s\n", strerror(sockerrno));
 		goto error;
 	}
 
 	if(connect(conn->fd, (struct sockaddr *)&conn->sa6, conn->salen) == -1){
-		if(sockerrno != EINPROGRESS){
-			fprintf(stderr, "http5connect: connect: %s\n", strerror(sockerrno));
+		int err = sockerrno;
+		if(!wouldblock(err)){
+			fprintf(stderr, "http5connect: connect: %s: %d\n", strerror(err), err);
 			goto error;
 		}
 	}
@@ -823,7 +830,7 @@ http5server(int port, int incap, int outcap, int (*handler)(Http5message *, Http
 		goto error;
 	}
 
-	flag = 1;
+	flag = 0;
 	if(setsockopt(lfd, IPPROTO_IPV6, IPV6_V6ONLY, (void *)&flag, sizeof flag) == -1){
 		fprintf(stderr, "http5server: setsockopt ipv6only=%d: %s\n", flag, strerror(sockerrno));
 		goto error;

@@ -8,7 +8,6 @@ handleall(Http5message *output, Http5message *input)
 	Http5buf *outbuf;
 	outbuf = &output->buf;
 	if(input->state == HTTP5_DONE && output->state == HTTP5_READY){
-	//fprintf(stderr, "process:%.*s--\n", (int)inbuf->len, inbuf->buf);
 		if(http5ok(output) == -1)
 			return -1;
 		if(http5putheader(output, "content-type", "text/plain") == -1)
