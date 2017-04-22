@@ -2,8 +2,10 @@
 #if defined(_WIN32)
 #include <stdio.h>
 #include <winsock2.h>
+#include <Ws2ipdef.h>
 typedef int ssize_t;
 typedef int socklen_t;
+#define sockerrno WSAGetLastError()
 #else
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +19,7 @@ typedef int socklen_t;
 #include <ctype.h>
 #define closesocket close
 #define ioctlsocket ioctl
+#define sockerrno errno
 #endif
 
 #define nelem(x) (sizeof(x)/sizeof(x[0]))

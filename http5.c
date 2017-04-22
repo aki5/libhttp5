@@ -2,9 +2,10 @@
 #include "os.h"
 #include "http5.h"
 
-typedef struct Http5 Http5;
+typedef struct Http5chan Http5chan;
 
-struct Http5 {
+struct Http5chan {
+	char name[128];
 	Http5message req;
 	Http5message resp;
 	int (*handler)(Http5message *, Http5message *);
@@ -587,9 +588,12 @@ http5request(Http5message *req, char *method, char *resource, char *version)
 }
 
 static int
-http5init(Http5 *ht5, int (*handler)(Http5message *, Http5message *), int incap, int outcap)
+http5init(Http5chan *ht5, char *name, int (*handler)(Http5message *, Http5message *), int incap, int outcap)
 {
 	memset(ht5, 0, sizeof ht5[0]);
+
+	strncpy(ht5->name, name, sizeof ht5->name-1);
+	ht5->name[sizeof ht5->name-1] = '\0';
 
 	ht5->req.buf.cap = incap;
 	ht5->resp.buf.cap = outcap;
@@ -610,7 +614,7 @@ http5init(Http5 *ht5, int (*handler)(Http5message *, Http5message *), int incap,
 }
 
 static void
-http5destroy(Http5 *ht5)
+http5destroy(Http5chan *ht5)
 {
 	if(ht5->req.buf.buf)
 		free(ht5->req.buf.buf);
@@ -619,7 +623,7 @@ http5destroy(Http5 *ht5)
 }
 
 static int
-http5io(Http5 *ht5, int fd, int flags)
+http5io(Http5chan *ht5, int fd, int flags)
 {
 	ssize_t nwr, nrd;
 	int code;
@@ -628,7 +632,7 @@ http5io(Http5 *ht5, int fd, int flags)
 	if((flags & HTTP5_READ_READY) != 0){
 		nrd = recv(fd, ht5->req.buf.buf + ht5->req.buf.len, ht5->req.buf.cap - ht5->req.buf.len, 0);
 		if(nrd == -1){
-			if(errno != EAGAIN)
+			if(sockerrno != EAGAIN)
 				rflags |= HTTP5_READ_ERROR;
 		} else if(nrd == 0){
 			rflags |= HTTP5_READ_EOF;
@@ -650,7 +654,7 @@ http5io(Http5 *ht5, int fd, int flags)
 	if(ht5->resp.buf.off < ht5->resp.buf.len && (flags & HTTP5_WRITE_READY) != 0){
 		nwr = send(fd, ht5->resp.buf.buf + ht5->resp.buf.off, ht5->resp.buf.len - ht5->resp.buf.off, 0);
 		if(nwr == -1){
-			if(errno != EAGAIN)
+			if(sockerrno != EAGAIN)
 				rflags |= HTTP5_WRITE_ERROR;
 		} else {
 			ht5->resp.buf.off += nwr;
@@ -676,12 +680,11 @@ http5io(Http5 *ht5, int fd, int flags)
 }
 
 static struct http5state {
-	char name[64];
-	struct sockaddr sa;
+	struct sockaddr_in6 sa6;
 	socklen_t salen;
 	int wready;
 	int fd;
-	Http5 ht5;
+	Http5chan ht5;
 } *conns;
 
 static int nconns;
@@ -700,29 +703,30 @@ http5connect(char *addr, int port, int incap, int outcap, int (*handler)(Http5me
 	memset(conn, 0, sizeof conn[0]);
 	conn->fd = -1;
 
-	if(inet_pton(AF_INET, addr, &conn->sa) == -1){
-		fprintf(stderr, "http5connect: inet_pton %s: %s\n", addr, strerror(errno));
+	if(inet_pton(AF_INET6, addr, &conn->sa6) == -1){
+		fprintf(stderr, "http5connect: inet_pton %s: %s\n", addr, strerror(sockerrno));
 		goto error;
 	}
-	((struct sockaddr_in *)&conn->sa)->sin_port = htons(port);
-	conn->salen = sizeof(struct sockaddr_in);
+	conn->sa6.sin6_port = htons(port);
+	conn->salen = sizeof conn->sa6;
 
 	if((conn->fd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1){
-		fprintf(stderr, "http5connect: socket: %s\n", strerror(errno));
+		fprintf(stderr, "http5connect: socket: %s\n", strerror(sockerrno));
 		goto error;
 	}
 
-	if(connect(conn->fd, &conn->sa, conn->salen) == -1){
-		fprintf(stderr, "http5connect: connect: %s\n", strerror(errno));
+	int flag = 1;
+	if(ioctlsocket(conn->fd, FIONBIO, &flag) == -1){
+		fprintf(stderr, "http5connect: failed to set non-blocking io: %s\n", strerror(sockerrno));
 		goto error;
 	}
 
-	int nonblock = 1;
-	if(ioctlsocket(conn->fd, FIONBIO, &nonblock) == -1){
-		fprintf(stderr, "http5connect: failed to set non-blocking io: %s\n", strerror(errno));
+	if(connect(conn->fd, (struct sockaddr *)&conn->sa6, conn->salen) == -1){
+		fprintf(stderr, "http5connect: connect: %s\n", strerror(sockerrno));
 		goto error;
 	}
-	if(http5init(&conn->ht5, handler, incap, outcap) == -1){
+
+	if(http5init(&conn->ht5, addr, handler, incap, outcap) == -1){
 		fprintf(stderr, "http5server: failed to initialize http connection\n");
 		goto error;
 	}
@@ -739,7 +743,7 @@ int
 http5server(int port, int incap, int outcap, int (*handler)(Http5message *, Http5message *))
 {
 	struct http5state *conn;
-	struct sockaddr_in sa;
+	struct sockaddr_in6 sa;
 	fd_set rset0, wset0, rset1, wset1;
 	fd_set *rset, *wset, *nextrset, *nextwset;
 	fd_set *tmpset;
@@ -748,27 +752,34 @@ http5server(int port, int incap, int outcap, int (*handler)(Http5message *, Http
 	int i, j;
 
 	nfd = -1;
-	if((lfd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1){
-		fprintf(stderr, "http5server: socket: %s\n", strerror(errno));
+	if((lfd = socket(PF_INET6, SOCK_STREAM, IPPROTO_TCP)) == -1){
+		fprintf(stderr, "http5server: socket: %s\n", strerror(sockerrno));
 		goto error;
 	}
 
 	int flag = 1;
 	if(setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, (void *)&flag, sizeof flag) == -1){
-		fprintf(stderr, "http5server: setsockopt: %s\n", strerror(errno));
+		fprintf(stderr, "http5server: setsockopt reuseaddr=%d: %s\n", flag, strerror(sockerrno));
 		goto error;
 	}
 
-	sa.sin_family = AF_INET;
-	sa.sin_port = htons(port);
-	sa.sin_addr.s_addr = htonl(INADDR_ANY);
+	flag = 1;
+	if(setsockopt(lfd, IPPROTO_IPV6, IPV6_V6ONLY, (void *)&flag, sizeof flag) == -1){
+		fprintf(stderr, "http5server: setsockopt ipv6only=%d: %s\n", flag, strerror(sockerrno));
+		goto error;
+	}
+
+	memset(&sa, 0, sizeof sa);
+	sa.sin6_family = AF_INET6;
+	sa.sin6_port = htons(port);
+	sa.sin6_addr = in6addr_any;
 	if(bind(lfd, (struct sockaddr*)&sa, sizeof sa) == -1){
-		fprintf(stderr, "http5server: bind: %s\n", strerror(errno));
+		fprintf(stderr, "http5server: bind: %s\n", strerror(sockerrno));
 		goto error;
 	}
 
 	if(listen(lfd, 1000) == -1){
-		fprintf(stderr, "http5server: listen: %s\n", strerror(errno));
+		fprintf(stderr, "http5server: listen: %s\n", strerror(sockerrno));
 		goto error;
 	}
 
@@ -792,27 +803,24 @@ http5server(int port, int incap, int outcap, int (*handler)(Http5message *, Http
 			}
 			conn = &conns[nconns];
 			memset(conn, 0, sizeof conn[0]);
-			conn->salen = sizeof conn->sa;
-			conn->fd = accept(lfd, &conn->sa, &conn->salen);
-			if(conn->sa.sa_family == AF_INET){
-				struct sockaddr_in *sa4 = (struct sockaddr_in*)&conn->sa;
-				size_t portoff;
-				inet_ntop(sa4->sin_family, &sa4->sin_addr.s_addr, conn->name, sizeof conn->name);
-				portoff = strlen(conn->name);
-				snprintf(conn->name+portoff, sizeof conn->name-portoff, ":%d", sa4->sin_port);
-			} else {
-				fprintf(stderr, "unsupported address family\n");
-				goto next;
-			}
+			conn->salen = sizeof conn->sa6;
+			conn->fd = accept(lfd, (struct sockaddr *)&conn->sa6, &conn->salen);
 			if(conn->fd != -1){
-				int nonblock = 1;
-				if(ioctlsocket(conn->fd, FIONBIO, &nonblock) == -1){
-					fprintf(stderr, "http5server: failed to set non-blocking io: %s\n", strerror(errno));
+				char name[128];
+				struct sockaddr_in6 *sa6 = &conn->sa6;
+				size_t portoff;
+				name[0] = '[';
+				inet_ntop(sa6->sin6_family, &sa6->sin6_addr, name+1, sizeof name-1);
+				portoff = strlen(name);
+				snprintf(name+portoff, sizeof name-portoff, "]:%d", sa6->sin6_port);
+				flag = 1;
+				if(ioctlsocket(conn->fd, FIONBIO, &flag) == -1){
+					fprintf(stderr, "http5server: failed to set non-blocking io: %s\n", strerror(sockerrno));
 					closesocket(conn->fd);
 					conn->fd = -1;
 					goto next;
 				}
-				if(http5init(&conn->ht5, handler, incap, outcap) == -1){
+				if(http5init(&conn->ht5, name, handler, incap, outcap) == -1){
 					fprintf(stderr, "http5server: failed to initialize http connection\n");
 					closesocket(conn->fd);
 					goto next;
