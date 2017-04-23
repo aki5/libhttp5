@@ -914,7 +914,7 @@ http5server(int port, int incap, int outcap, int (*handler)(void **statep, Http5
 				name[0] = '[';
 				inet_ntop(sa6->sin6_family, &sa6->sin6_addr, name+1, sizeof name-1);
 				portoff = strlen(name);
-				snprintf(name+portoff, sizeof name-portoff, "]:%d", sa6->sin6_port);
+				snprintf(name+portoff, sizeof name-portoff, "]:%d", ntohs(sa6->sin6_port));
 				flag = 1;
 				if(ioctlsocket(conn->fd, FIONBIO, &flag) == -1){
 					fprintf(stderr, "http5server: failed to set non-blocking io: %s\n", strerror(sockerrno));
