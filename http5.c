@@ -8,7 +8,8 @@ struct Http5chan {
 	char name[128];
 	Http5message input;
 	Http5message output;
-	int (*handler)(Http5message *, Http5message *);
+	void *state;
+	int (*handler)(void **statep, Http5message *, Http5message *);
 };
 
 static int
@@ -26,6 +27,16 @@ isnonspace(int c)
 {
 	switch(c){
 	case '\t': case '\v': case '\f': case ' ': case '\r': case '\n':
+		return 0;
+	}
+	return 1;
+}
+
+static int
+islenchar(int c)
+{
+	switch(c){
+	case '\t': case '\v': case '\f': case ' ': case '\r': case '\n': case ';':
 		return 0;
 	}
 	return 1;
@@ -108,6 +119,20 @@ skipchar(char *buf, size_t *offp, size_t len, int ch)
 	if(off == len)
 		return -1;
 	if(buf[off++] != ch)
+		return -2;
+	*offp = off;
+	return 0;
+}
+
+static int
+skiplength(char *buf, size_t *offp, size_t len)
+{
+	size_t off = *offp;
+	while(off < len && islenchar(buf[off]))
+		off++;
+	if(off == len)
+		return -1;
+	if(off == *offp)
 		return -2;
 	*offp = off;
 	return 0;
@@ -386,9 +411,10 @@ http5parse(Http5message *req)
 		req->state = HTTP5_PARSE_CHUNK;
 		req->body.off = off;
 
-		if((code = skipvalue(buf, &off, len)) < 0)
+		if((code = skiplength(buf, &off, len)) < 0)
 			return code;
 		req->body.len = off - req->body.off;
+		skipvalue(buf, &off, len); // skip any possible chunk data
 		if((code = skipendline(buf, &off, len)) < 0)
 			return code;
 		if(http5hex(htbuf, &req->body, &req->body.len) == -1)
@@ -506,26 +532,26 @@ http5putbody(Http5message *resp, char *body, size_t len)
 }
 
 int
-http5respond(Http5message *resp, char *version, char *code, char *reason)
+http5putline(Http5message *msg, char *first, char *second, char *third)
 {
 	Http5buf *htbuf;
-	resp->type = HTTP5_TYPE_RESPONSE;
-	htbuf = &resp->buf;
-	if(http5putstring(&resp->line[0], htbuf, version) == -1)
+	msg->type = HTTP5_TYPE_REQUEST;
+	htbuf = &msg->buf;
+	if(http5putstring(&msg->line[0], htbuf, first) == -1)
 		return -1;
 	if(http5putchar(htbuf, ' ') == -1)
 		return -1;
-	if(http5putstring(&resp->line[1], htbuf, code) == -1)
+	if(http5putstring(&msg->line[1], htbuf, second) == -1)
 		return -1;
 	if(http5putchar(htbuf, ' ') == -1)
 		return -1;
-	if(http5putstring(&resp->line[2], htbuf, reason) == -1)
+	if(http5putstring(&msg->line[2], htbuf, third) == -1)
 		return -1;
 	if(http5putchar(htbuf, '\r') == -1)
 		return -1;
 	if(http5putchar(htbuf, '\n') == -1)
 		return -1;
-	return 0;	
+	return 0;
 }
 
 int
@@ -604,7 +630,7 @@ http5code(Http5message *resp, int code)
 			break;
 	if(i == nelem(codes))
 		return -1;
-	return http5respond(resp, "HTTP/1.1", codes[i].scode, codes[i].reason);
+	return http5putline(resp, "HTTP/1.1", codes[i].scode, codes[i].reason);
 }
 
 int
@@ -613,31 +639,26 @@ http5ok(Http5message *resp)
 	return http5code(resp, 200);
 }
 
-int
-http5request(Http5message *req, char *method, char *resource, char *version)
+void
+http5read(Http5message *msg)
 {
-	Http5buf *htbuf;
-	req->type = HTTP5_TYPE_REQUEST;
-	htbuf = &req->buf;
-	if(http5putstring(&req->line[0], htbuf, method) == -1)
-		return -1;
-	if(http5putchar(htbuf, ' ') == -1)
-		return -1;
-	if(http5putstring(&req->line[1], htbuf, resource) == -1)
-		return -1;
-	if(http5putchar(htbuf, ' ') == -1)
-		return -1;
-	if(http5putstring(&req->line[2], htbuf, version) == -1)
-		return -1;
-	if(http5putchar(htbuf, '\r') == -1)
-		return -1;
-	if(http5putchar(htbuf, '\n') == -1)
-		return -1;
-	return 0;
+	msg->state = HTTP5_READY;
+}
+
+void
+http5write(Http5message *msg)
+{
+	msg->state = HTTP5_WRITE;
+}
+
+void
+http5close(Http5message *msg)
+{
+	msg->state = HTTP5_CLOSE;
 }
 
 static int
-http5init(Http5chan *ht5, char *name, int (*handler)(Http5message *, Http5message *), int incap, int outcap)
+http5init(Http5chan *ht5, char *name, int (*handler)(void **statep, Http5message *, Http5message *), int incap, int outcap)
 {
 	memset(ht5, 0, sizeof ht5[0]);
 
@@ -665,6 +686,9 @@ http5init(Http5chan *ht5, char *name, int (*handler)(Http5message *, Http5messag
 static void
 http5destroy(Http5chan *ht5)
 {
+	ht5->input.state = HTTP5_CLOSE;
+	ht5->output.state = HTTP5_CLOSE;
+	ht5->handler(&ht5->state, &ht5->output, &ht5->input);
 	if(ht5->input.buf.buf)
 		free(ht5->input.buf.buf);
 	if(ht5->output.buf.buf)
@@ -679,10 +703,11 @@ http5io(Http5chan *ht5, int fd, int flags)
 	int rflags = 0;
 
 	if(ht5->input.state == HTTP5_READY && ht5->output.state == HTTP5_READY)
-		if(ht5->handler(&ht5->output, &ht5->input) == -1)
+		if(ht5->handler(&ht5->state, &ht5->output, &ht5->input) == -1)
 			rflags |= HTTP5_PROCESS_ERROR;
 
 	if(ht5->input.state != HTTP5_DONE && (flags & HTTP5_READ_READY) != 0){
+		if(0)fputc('r', stderr);
 		nrd = recv(fd, ht5->input.buf.buf + ht5->input.buf.len, ht5->input.buf.cap - ht5->input.buf.len, 0);
 		if(nrd == -1){
 			if(!wouldblock(sockerrno))
@@ -702,7 +727,7 @@ parsemore:
 				rflags |= HTTP5_PROTOCOL_ERROR;
 			}
 			if(ht5->input.state == HTTP5_DONE){
-				if(ht5->handler(&ht5->output, &ht5->input) == -1)
+				if(ht5->handler(&ht5->state, &ht5->output, &ht5->input) == -1)
 					rflags |= HTTP5_PROCESS_ERROR;
 				if(ht5->input.state != HTTP5_DONE && ht5->input.state != HTTP5_CLOSE)
 					goto parsemore;
@@ -712,6 +737,7 @@ parsemore:
 
 	if(ht5->output.state != HTTP5_DONE && (flags & HTTP5_WRITE_READY) != 0){
 		if(ht5->output.buf.len != ht5->output.buf.off){
+			if(0)fputc('t', stderr);
 			nwr = send(fd, ht5->output.buf.buf + ht5->output.buf.off, ht5->output.buf.len - ht5->output.buf.off, 0);
 			if(nwr == -1){
 				if(!wouldblock(sockerrno))
@@ -720,7 +746,7 @@ parsemore:
 				ht5->output.buf.off += nwr;
 				if(ht5->output.buf.off == ht5->output.buf.len){
 					ht5->output.state = HTTP5_DONE;
-					if(ht5->handler(&ht5->output, &ht5->input) == -1)
+					if(ht5->handler(&ht5->state, &ht5->output, &ht5->input) == -1)
 						rflags |= HTTP5_PROCESS_ERROR;
 				}
 			}
@@ -748,7 +774,7 @@ static int aconns;
 static int nactive;
 
 int
-http5connect(char *addr, int port, int incap, int outcap, int (*handler)(Http5message *, Http5message *))
+http5connect(char *addr, int port, int incap, int outcap, int (*handler)(void **statep, Http5message *, Http5message *))
 {
 	struct http5state *conn;
 	if(nconns == aconns){
@@ -807,7 +833,7 @@ error:
 }
 
 int
-http5server(int port, int incap, int outcap, int (*handler)(Http5message *, Http5message *))
+http5server(int port, int incap, int outcap, int (*handler)(void **statep, Http5message *, Http5message *))
 {
 	struct http5state *conn;
 	struct sockaddr_in6 sa;
@@ -869,6 +895,7 @@ http5server(int port, int incap, int outcap, int (*handler)(Http5message *, Http
 	}
 
 	for(;;){
+		if(0)fputc('s', stderr);
 		select(maxfd+1, rset, wset, NULL, NULL);
 		if(FD_ISSET(lfd, rset)){
 			if(nconns == aconns){
@@ -878,6 +905,7 @@ http5server(int port, int incap, int outcap, int (*handler)(Http5message *, Http
 			conn = &conns[nconns];
 			memset(conn, 0, sizeof conn[0]);
 			conn->salen = sizeof conn->sa6;
+			if(0)fputc('a', stderr);
 			conn->fd = accept(lfd, (struct sockaddr *)&conn->sa6, &conn->salen);
 			if(conn->fd != -1){
 				char name[128];

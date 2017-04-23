@@ -57,15 +57,19 @@ struct Http5message {
 	Http5buf buf;
 };
 
-int http5connect(char *addr, int port, int incap, int outcap, int (*handler)(Http5message *, Http5message *));
-int http5server(int port, int incap, int outcap, int (*handler)(Http5message *, Http5message *));
+int http5connect(char *addr, int port, int incap, int outcap, int (*handler)(void **statep, Http5message *, Http5message *));
+int http5server(int port, int incap, int outcap, int (*handler)(void **statep, Http5message *, Http5message *));
 
 int http5request(Http5message *req, char *method, char *resource, char *version);
 
 int http5ok(Http5message *resp);
 int http5code(Http5message *resp, int code);
-int http5respond(Http5message *resp, char *version, char *code, char *reason);
+int http5putline(Http5message *resp, char *first, char *second, char *third);
 
 void http5clear(Http5message *msg);
 int http5putheader(Http5message *msg, char *key, char *value);
 int http5putbody(Http5message *msg, char *body, size_t len);
+
+void http5read(Http5message *msg);
+void http5write(Http5message *msg);
+void http5close(Http5message *msg);
