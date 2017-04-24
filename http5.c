@@ -886,11 +886,15 @@ http5server(int port, int incap, int outcap, int (*handler)(void **statep, Http5
 	nextwset = &wset1;
 
 	FD_SET(lfd, rset);
+	maxfd = lfd;
+
 	for(i = 0; i < nconns; i++){
 		if(conns[i].fd != -1){
 			maxfd = maxfd > conns[i].fd ? maxfd : conns[i].fd;
-			if(!conns[i].wready)
+			if(!conns[i].wready){
 				FD_SET(conns[i].fd, wset);
+				maxfd = maxfd > conns[i].fd ? maxfd : conns[i].fd;
+			}
 		}
 	}
 
