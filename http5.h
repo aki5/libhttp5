@@ -3,7 +3,7 @@ typedef struct Http5ref Http5ref;
 typedef struct Http5buf Http5buf;
 typedef struct Http5header Http5header;
 typedef struct Http5message Http5message;
-typedef struct Http5message Http5message;
+typedef struct Http5chan Http5chan;
 
 enum {
 	HTTP5_TYPE_REQUEST = 1,
@@ -15,6 +15,7 @@ enum {
 	HTTP5_PARSE_BODY,
 	HTTP5_PARSE_CHUNK,
 	HTTP5_PARSE_CHUNK_BODY,
+	HTTP5_PARSE_TRAILER,
 	HTTP5_WRITE,
 	HTTP5_DONE,
 	HTTP5_CLOSE,
@@ -56,6 +57,16 @@ struct Http5message {
 	size_t nheaders;
 	Http5buf buf;
 };
+
+
+struct Http5chan {
+	char name[128];
+	Http5message input;
+	Http5message output;
+	void *state;
+	int (*handler)(void **statep, Http5message *, Http5message *);
+};
+
 
 int http5connect(char *addr, int port, int incap, int outcap, int (*handler)(void **statep, Http5message *, Http5message *));
 int http5server(int port, int incap, int outcap, int (*handler)(void **statep, Http5message *, Http5message *));

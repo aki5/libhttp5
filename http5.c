@@ -2,15 +2,6 @@
 #include "os.h"
 #include "http5.h"
 
-typedef struct Http5chan Http5chan;
-
-struct Http5chan {
-	char name[128];
-	Http5message input;
-	Http5message output;
-	void *state;
-	int (*handler)(void **statep, Http5message *, Http5message *);
-};
 
 static int
 iswhite(int c)
@@ -346,7 +337,7 @@ http5parse(Http5message *req)
 			if((code = skipendline(buf, &off, len)) == -1)
 				return -1;
 			if(code == 0)
-				goto parsebody;
+				goto casebody;
 
 			// skip until colon
 			keyoff = off;
@@ -380,7 +371,7 @@ http5parse(Http5message *req)
 			req->nheaders++;
 			htbuf->off = off;
 		}
-	parsebody:
+	casebody:
 		htbuf->off = off;
 		req->state = HTTP5_PARSE_BODY;
 		// check for the presence of a content-length header to determine whether there is a body or not.
@@ -421,6 +412,10 @@ http5parse(Http5message *req)
 			return -2;
 		req->body.off = off;
 		htbuf->off = off;
+		if(req->body.len == 0){
+			htbuf->off = off;
+			goto casetrailer;
+		}
 	case HTTP5_PARSE_CHUNK_BODY:
 		req->state = HTTP5_PARSE_CHUNK_BODY;
 		if(len < req->body.off + req->body.len)
@@ -429,6 +424,55 @@ http5parse(Http5message *req)
 		if((code = skipendline(buf, &off, len)) < 0)
 			return code;
 		htbuf->off = off;
+		goto casedone;
+	case HTTP5_PARSE_TRAILER:
+	casetrailer:
+		req->state = HTTP5_PARSE_TRAILER;
+		for(;;){
+			// skip any whitespace before key
+			if(skipspace(buf, &off, len) == -1)
+				return -1;
+			// empty line terminates header section
+			if((code = skipendline(buf, &off, len)) == -1)
+				return -1;
+
+			if(code == 0){
+				htbuf->off = off;
+				goto casedone;
+			}
+
+			// skip until colon
+			keyoff = off;
+			if(skipkey(buf, &off, len) == -1)
+				return -1;
+			keylen = off - keyoff;
+
+			if((code = skipchar(buf, &off, len, ':')) < 0)
+				return code;
+
+			// skip any whitespace preceding value
+			if(skipspace(buf, &off, len) == -1)
+				return -1;
+
+			valueoff = off;
+			if(skipvalue(buf, &off, len) == -1)
+				return -1;
+			valuelen = off - valueoff;
+
+			if((code = skipendline(buf, &off, len)) < 0)
+				return code;
+
+			// store the header.
+			if(req->nheaders >= nelem(req->headers))
+				return -2;
+			req->headers[req->nheaders] = (Http5header){
+				(Http5ref){keyoff, keylen},
+				(Http5ref){valueoff, valuelen}
+			};
+			http5tolower(htbuf, &req->headers[req->nheaders].key);
+			req->nheaders++;
+			htbuf->off = off;
+		}
 	case HTTP5_DONE:
 	casedone:
 		req->state = HTTP5_DONE;
